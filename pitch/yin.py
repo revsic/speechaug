@@ -39,7 +39,7 @@ def parabolic_interp(x: torch.Tensor) -> torch.Tensor:
     return F.pad(shifts, [1, 1])
 
 
-class PitchTracker(nn.Module):
+class YIN(nn.Module):
     """YIN-based pitch estimation algorithm.
     """
     def __init__(self,
@@ -61,7 +61,7 @@ class PitchTracker(nn.Module):
         """
         super().__init__()
         self.sr = sr
-        self.strides = int(sr * frame_time)
+        self.strides = int(down_sr * frame_time)
         self.tau_max = int(down_sr // freq_min)
         self.tau_min = int(down_sr // freq_max)
         self.threshold = threshold
@@ -121,11 +121,11 @@ class PitchTracker(nn.Module):
         # [..., T / strides, windows]
         frames = F.pad(down, [0, w]).unfold(-1, w, self.strides)
         # [..., T / strides, tau_max - tau_min], cumulative mean normalized difference
-        cmnd = PitchTracker.cmnd(frames, self.tau_max, self.tau_min)
+        cmnd = YIN.cmnd(frames, self.tau_max, self.tau_min)
         # sampling
-        return self.sample_yin(cmnd)
+        return self.sample(cmnd)
 
-    def sample_yin(self, cmnd: torch.Tensor) -> torch.Tensor:
+    def sample(self, cmnd: torch.Tensor) -> torch.Tensor:
         """Sample pitch frequency locally.
         Args:
             cmnd: [torch.float32; [..., T / strides, tau_max - tau_min]],
