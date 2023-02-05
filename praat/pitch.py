@@ -12,7 +12,7 @@ def localmin(x: torch.Tensor) -> torch.Tensor:
     Args:
         x: [torch.float32; [..., T]], input tensor.
     Returns:
-        [torch.bool; [..., T]], local minima.
+        [bool; [..., T]], local minima.
     """
     # [..., T + 1], x[i + 1] - x[i]
     d = F.pad(x.diff(dim=-1), [1, 1])
@@ -20,8 +20,8 @@ def localmin(x: torch.Tensor) -> torch.Tensor:
     return (d[..., :-1] <= 0) & (d[..., 1:] >= 0)
 
 
-class YinPitch(nn.Module):
-    """YIN pitch estimation algorithm.
+class PitchTracker(nn.Module):
+    """YIN-based pitch estimation algorithm.
     """
     def __init__(self,
                  sr: int,
@@ -55,6 +55,8 @@ class YinPitch(nn.Module):
         Args:
             signal: [torch.float32; [..., W]], input signal.
             tmax, tmin: maximum, minimum value of the time-lag.
+        Returns:
+            [torch.float32; [..., tmax - tmin]], CMND.
         """
         # one-based
         # d[tau]
@@ -107,7 +109,20 @@ class YinPitch(nn.Module):
         return F.pad(shifts, [1, 1])
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Estimate the pitch from the 
+        """Estimate the pitch from the input signal.
+        Args:
+            inputs: [torch.float32; [..., T]], input audio.
+        Returns:
+            [torch.float32; [..., S]], pitch frequency.
+        """
+        return self.yin(inputs)
+
+    def yin(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Estimate the pitch frequency based on YIN.
+        Args:
+            inputs: [torch.float32; [..., T]], input audio.
+        Returns:
+            [torch.float32; [..., S]], pitch sequence.
         """
         down = AF.resample(inputs, self.sr, self.down_sr)
         # set windows based on tau-max
@@ -115,7 +130,7 @@ class YinPitch(nn.Module):
         # [B, T / strides, windows]
         frames = F.pad(down, [0, w]).unfold(-1, w, self.strides)
         # [B, T / strides, tau_max - tau_min], cumulative mean normalized difference
-        cmnd = YinPitch.cmnd(frames, self.tau_max, self.tau_min)
+        cmnd = PitchTracker.cmnd(frames, self.tau_max, self.tau_min)
 
         # [B, T / strides]
         thold = (cmnd < self.threshold).long().argmax(dim=-1)
@@ -133,7 +148,7 @@ class YinPitch(nn.Module):
         tau[tau == self.tau_max - self.tau_min - 1] == 0
 
         # [B, T / strides, tau_max - tau_min]
-        pshifts = YinPitch.parabolic_interp(cmnd)
+        pshifts = PitchTracker.parabolic_interp(cmnd)
         # refining peak
         period = tau + self.tau_min + 1 + pshifts.gather(-1, tau[..., None]).squeeze(dim=-1)
         # [B, T / strides], to frequency
@@ -146,4 +161,4 @@ class YinPitch(nn.Module):
             pitch = torch.median(
                 pitch.unfold(-1, self.median_win, 1),
                 dim=-1).values
-        return pitch, cmnd
+        return pitch
