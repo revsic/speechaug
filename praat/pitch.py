@@ -20,6 +20,25 @@ def localmin(x: torch.Tensor) -> torch.Tensor:
     return (d[..., :-1] <= 0) & (d[..., 1:] >= 0)
 
 
+def parabolic_interp(x: torch.Tensor) -> torch.Tensor:
+    """Parabolic interpolation for smoothing difference function.
+    Args:
+        x: [torch.float32; [..., C]], input tensor.
+    Returns:
+        [torch.float32; [..., C]], parabolic shifts.
+    """
+    # [..., C - 2], previous, current, next
+    p, c, n = x[..., :-2], x[..., 1:-1], x[..., 2:]
+    # assume x is convex, then a > 0
+    a = n + p - 2 * c
+    b = 0.5 * (n - p)
+    # [..., C - 2]
+    shifts = -b / a
+    shifts[b.abs() >= a.abs()] = 0.
+    # [..., C], edge
+    return F.pad(shifts, [1, 1])
+
+
 class PitchTracker(nn.Module):
     """YIN-based pitch estimation algorithm.
     """
@@ -89,69 +108,51 @@ class PitchTracker(nn.Module):
         # [..., tmax - tmin]
         return F.pad(cumdiff, [1, 0], value=1.)[..., tmin:]
 
-    @classmethod
-    def parabolic_interp(self, x: torch.Tensor) -> torch.Tensor:
-        """Parabolic interpolation for smoothing difference function.
-        Args:
-            x: [torch.float32; [..., C]], input tensor.
-        Returns:
-            [torch.float32; [..., C]], parabolic shifts.
-        """
-        # [..., C - 2], previous, current, next
-        p, c, n = x[..., :-2], x[..., 1:-1], x[..., 2:]
-        # assume x is convex, then a > 0
-        a = n + p - 2 * c
-        b = 0.5 * (n - p)
-        # [..., C - 2]
-        shifts = -b / a
-        shifts[b.abs() >= a.abs()] = 0.
-        # [..., C], edge
-        return F.pad(shifts, [1, 1])
-
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Estimate the pitch from the input signal.
+        """Estimate the pitch from the input signal based on YIN.
         Args:
             inputs: [torch.float32; [..., T]], input audio.
         Returns:
             [torch.float32; [..., S]], pitch frequency.
         """
-        return self.yin(inputs)
-
-    def yin(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Estimate the pitch frequency based on YIN.
-        Args:
-            inputs: [torch.float32; [..., T]], input audio.
-        Returns:
-            [torch.float32; [..., S]], pitch sequence.
-        """
         down = AF.resample(inputs, self.sr, self.down_sr)
         # set windows based on tau-max
         w = int(2 ** np.ceil(np.log2(self.tau_max))) + 1
-        # [B, T / strides, windows]
+        # [..., T / strides, windows]
         frames = F.pad(down, [0, w]).unfold(-1, w, self.strides)
-        # [B, T / strides, tau_max - tau_min], cumulative mean normalized difference
+        # [..., T / strides, tau_max - tau_min], cumulative mean normalized difference
         cmnd = PitchTracker.cmnd(frames, self.tau_max, self.tau_min)
+        # sampling
+        return self.sample_yin(cmnd)
 
-        # [B, T / strides]
+    def sample_yin(self, cmnd: torch.Tensor) -> torch.Tensor:
+        """Sample pitch frequency locally.
+        Args:
+            cmnd: [torch.float32; [..., T / strides, tau_max - tau_min]],
+                framed cumulative mean normalized difference.
+        Returns:
+            [torch.float32; [..., S]], pitch sequence.
+        """
+        # [..., T / strides]
         thold = (cmnd < self.threshold).long().argmax(dim=-1)
         # if not found
         thold[thold == 0] = self.tau_max - self.tau_min
-        # [B, T / strides, tau_max - tau_min] switch mask
+        # [..., T / strides, tau_max - tau_min] switch mask
         thold = thold[..., None] <= torch.arange(
             self.tau_max - self.tau_min, device=cmnd.device)
 
-        # [B, T / strides, tau_max - tau_min]
+        # [..., T / strides, tau_max - tau_min]
         lmin = localmin(cmnd)
-        # [B, T / strides]
+        # [..., T / strides]
         tau = (thold & lmin).long().argmax(dim=-1)
         # if not found
         tau[tau == self.tau_max - self.tau_min - 1] == 0
 
-        # [B, T / strides, tau_max - tau_min]
-        pshifts = PitchTracker.parabolic_interp(cmnd)
+        # [..., T / strides, tau_max - tau_min]
+        pshifts = parabolic_interp(cmnd)
         # refining peak
         period = tau + self.tau_min + 1 + pshifts.gather(-1, tau[..., None]).squeeze(dim=-1)
-        # [B, T / strides], to frequency
+        # [..., T / strides], to frequency
         pitch = torch.where(
             tau > 0,
             self.down_sr / period,
