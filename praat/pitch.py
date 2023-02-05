@@ -28,8 +28,8 @@ class YinPitch(nn.Module):
                  frame_time: float = 0.01,
                  freq_min: float = 75.,
                  freq_max: float = 600.,
-                 threshold: float = 0.1,
-                 win_length: Optional[int] = 30,
+                 threshold: float = 0.2,
+                 median_win: Optional[int] = 3,
                  down_sr: int = 16000):
         """Initializer.
         Args:
@@ -37,16 +37,16 @@ class YinPitch(nn.Module):
             frame_time: duration of the frame.
             freq_min, freq_max: frequency min and max.
             threshold: harmonicity threshold.
-            win_length: length of the window for median smoothing.
+            median_win: length of the window for median smoothing.
             down_sr: downsampling sr for fast computation.
         """
         super().__init__()
         self.sr = sr
         self.strides = int(sr * frame_time)
-        self.median_win = win_length
         self.tau_max = int(down_sr // freq_min)
         self.tau_min = int(down_sr // freq_max)
         self.threshold = threshold
+        self.median_win = median_win
         self.down_sr = down_sr
 
     @classmethod
@@ -143,11 +143,7 @@ class YinPitch(nn.Module):
             torch.tensor(0., device=tau.device))
         # median pool
         if self.median_win is not None:
-            padded = F.pad(
-                pitch[:, None],
-                [self.median_win // 2, self.median_win // 2 - 1],
-                mode='replicate').squeeze(dim=1)
             pitch = torch.median(
-                padded.unfold(-1, self.median_win, 1),
+                pitch.unfold(-1, self.median_win, 1),
                 dim=-1).values
-        return pitch
+        return pitch, cmnd
