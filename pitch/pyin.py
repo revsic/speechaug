@@ -29,7 +29,7 @@ def viterbi(log_prob: torch.Tensor, log_trans: torch.Tensor, log_init: torch.Ten
     # [..., S], backtracking
     states = torch.zeros_like(log_prob[..., 0], dtype=torch.long)
     # initial state
-    states[..., -1] = value.argmx(dim=-1)
+    states[..., -1] = value.argmax(dim=-1)
     for i in range(steps - 2, -1, -1):
         # [...]
         states[..., i] = ptrs[..., i + 1, :].gather(
@@ -117,19 +117,27 @@ class pYIN(YIN):
         # [..., T / strides, tau_max - tau_min]
         probs = torch.matmul(prior, self.beta_probs[:, None]).squeeze(dim=-1)
 
-        # ## add prob to global minima if no candidates below the threshold
-        # ## else add prob to each candidates below the threshold
-        # # [..., T / strides]
-        # global_min = cmnd.masked_fill(~lmin, np.inf).argmin(dim=-1)
-        # # [..., T / setrides, 1, num_thresholds], threshold of global min
-        # holds = tholds.gather(
-        #     -2,
-        #     global_min[..., None, None].repeat(
-        #         list(range(cmnd.dim())) + [tholds.shape[-1]]))
-        # # [..., T / strides]
-        # n_thresholds_below_min = torch.count_nonzero(~holds.squeeze(dim=-2), dim=-1)
-        # probs[global_min] += no_trough_prob * np.sum(
-        #     beta_probs[:n_threshold_below_min])
+        ## add prob to global minima if no candidates below the threshold
+        ## else add prob to each candidates below the threshold
+        # [..., T / strides]
+        global_min = cmnd.masked_fill(~lmin, np.inf).argmin(dim=-1)
+        # alias
+        num_tholds = tholds.shape[-1]
+        # [..., T / strides, 1, num_thresholds], threshold of global min
+        holds = tholds.gather(
+            -2,
+            global_min[..., None, None].repeat(
+                [1] * cmnd.dim() + [num_tholds]))
+        # [..., T / strides]
+        below_min = torch.count_nonzero(~holds.squeeze(dim=-2), dim=-1)
+        # [tholds]
+        a = torch.arange(num_tholds, device=device)
+        # add probs
+        probs.scatter_add_(
+            -1,
+            global_min[..., None],
+            self.no_trough_prob * (
+                (a < below_min[..., None]).float() * self.beta_probs).sum(dim=-1, keepdim=True))
 
         # [tau_max - tau_min]
         tau = torch.arange(self.tau_max - self.tau_min, device=device)
@@ -144,18 +152,18 @@ class pYIN(YIN):
         bins = bins.round().clamp(0, self.total_bins - 1).long()
 
         # [..., T / strides, 2 x total_bins], observation probs
-        observed = torch.zeros(*bins.shape[:-1], self.total_bins * 2)
+        observed = torch.zeros(*bins.shape[:-1], self.total_bins * 2, device=device)
         observed.scatter_(-1, bins, probs)
         # voice probs
         voiced = observed[..., :self.total_bins].sum(dim=-1).clamp(0., 1.)
-        observed[..., self.total_bins:] = (1 - voiced) / self.total_bins
+        observed[..., self.total_bins:] = (1 - voiced[..., None]) / self.total_bins
 
         # path search
         # [..., T / strides]
         states = viterbi(
-            observed,
-            self.transition,
-            p_init=self.p_init)
+            observed.clamp_min(1e-7).log(),
+            self.transition.clamp_min(1e-7).log(),
+            self.p_init.clamp_min(1e-7).log())
         # convert to frequency
         f0 = self.freqs[states % self.total_bins]
         # if in voice
@@ -180,8 +188,9 @@ class pYIN(YIN):
             torch.linspace(0., 1., num_thresholds + 1),
             persistent=False)
         # beta-distribution prior
+        import scipy.stats
         a, b = beta_parameters
-        beta_cdf = torch.distributions.Beta(a, b).cdf(self.thresholds)
+        beta_cdf = torch.tensor(scipy.stats.beta.cdf(self.thresholds, a, b), dtype=torch.float32)
         # [num_thresholds]
         self.register_buffer(
             'beta_probs',
