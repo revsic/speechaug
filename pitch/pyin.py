@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
@@ -52,7 +52,8 @@ class pYIN(YIN):
                  switch_prob: float = 0.01,
                  lambda_: float = 2.,
                  max_octave_trans: float = 35.92,
-                 no_trough_prob: float = 0.01):
+                 no_trough_prob: float = 0.01,
+                 median_win: Optional[int] = 3):
         """Initializer.
         Args:
             sr: sampling rate.
@@ -76,6 +77,7 @@ class pYIN(YIN):
             threshold=None,
             median_win=None,
             down_sr=down_sr)
+        self.median_win = median_win
         # pYIN parameters
         self.fmin = freq_min
         self.bins_per_octave = bins_per_octave
@@ -170,6 +172,11 @@ class pYIN(YIN):
         voiced_flag = states < self.total_bins
         # unvoice to zero
         f0[~voiced_flag] = 0.
+        # median pool
+        if self.median_win is not None:
+            f0 = torch.median(
+                f0.unfold(-1, self.median_win, 1),
+                dim=-1).values
         return f0
 
     def register_pyin_state(self,
