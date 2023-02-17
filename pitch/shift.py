@@ -197,8 +197,19 @@ class PitchShift(nn.Module):
         """
         device = signal.device
         max_w = 1.25 * self.sr / pitch[pitch > 0].min()
+        # T
+        timesteps, = signal.shape
         # [T]
         new_signal = torch.zeros_like(signal)
+
+        cache = {}
+        def cached_window(left: int, right: int) -> torch.Tensor:
+            nonlocal device, cache
+            if left not in cache:
+                cache[left] = self.window_fn(left * 2, device=device)
+            if right not in cache:
+                cache[right] = self.window_fn(right * 2, device=device)
+            return torch.cat([cache[left][:left], cache[right][right:]], dim=0)
 
         i = 0
         while i < len(signal):
@@ -223,18 +234,20 @@ class PitchShift(nn.Module):
                     left_w = min(peaks[p] - peaks[p - 1], left_w)
                 if p < len(peaks) - 1 and peaks[p + 1] - peaks[p] <= max_w:
                     right_w = min(peaks[p + 1] - peaks[p], right_w)
+                # clamping for sampling
+                left_w, right_w = min(left_w, peaks[p]), max(min(right_w, timesteps - peaks[p]), 0)
                 # offset to index
-                left_i, right_i = max(peaks[p] - left_w, 0), peaks[p] + right_w
+                left_i, right_i = peaks[p] - left_w, peaks[p] + right_w
                 # copy
-                ival = (right_i - left_i) // 2
-                window = torch.hann_window(ival * 2, device=device)
-                seglen = min(
-                    len(new_signal[left_v - ival:left_v + ival]),
-                    len(signal[left_i:left_i + ival * 2]))
-                new_signal[left_v - ival:left_v - ival + seglen] += \
-                    (window[:seglen] * signal[left_i:left_i + seglen])
+                s = left_v - (right_i - left_i) // 2
+                intval = min(right_i - left_i, timesteps - s)
+                # for safety
+                if intval == 0:
+                    break
+                seg = cached_window(left_w, right_w) * signal[left_i:right_i]
+                new_signal[s:s + intval] = seg[:intval]
                 # next
-                left_v += ival * 2
+                left_v += intval
             # next segment
             i = right_v
         # copy last noise
