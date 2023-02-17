@@ -6,12 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-from typing import Optional, Tuple, Union
-
-
-from typing import Optional, Tuple, Union
-
-
 def find_voiced_segment(f0: torch.Tensor, i: int = 0) -> Optional[Tuple[int, int]]:
     """Find voiced segment starting from `i`.
     Args:
@@ -129,7 +123,7 @@ def find_allpeaks(signal: torch.Tensor, f0: torch.Tensor, sr: float, floor: floa
     if len(peaks) == 0:
         return None
     # sort the point
-    return torch.stack(sorted(peaks))
+    return torch.stack(sorted(peaks)).clamp(0, len(signal) - 1)
 
 
 def psola(signal: torch.Tensor, pitch: torch.Tensor, peaks: torch.Tensor, sr: float, floor: float = 60):
@@ -162,7 +156,7 @@ def psola(signal: torch.Tensor, pitch: torch.Tensor, peaks: torch.Tensor, sr: fl
             p = (peaks - left_v).abs().argmin()
             period = int(sr / pitch[left_v].clamp_min(floor))
             # width
-            left_w, right_w = period, period
+            left_w, right_w = period // 2, period // 2
             # clamping
             if p > 0 and peaks[p] - peaks[p - 1] <= max_w:
                 left_w = min(peaks[p] - peaks[p - 1], left_w)
@@ -173,8 +167,11 @@ def psola(signal: torch.Tensor, pitch: torch.Tensor, peaks: torch.Tensor, sr: fl
             # copy
             ival = (right_i - left_i) // 2
             window = torch.hann_window(ival * 2, device=device)
-            new_signal[left_v - ival:left_v + ival] += \
-                (window * signal[left_i:left_i + ival * 2])
+            seglen = min(
+                len(new_signal[left_v - ival:left_v + ival]),
+                len(signal[left_i:left_i + ival * 2]))
+            new_signal[left_v - ival:left_v - ival + seglen] += \
+                (window[:seglen] * signal[left_i:left_i + seglen])
             # next
             left_v += ival * 2
         # next segment
@@ -198,14 +195,14 @@ class PitchShift(nn.Module):
     def forward(self,
                 snd: torch.Tensor,
                 pitch: torch.Tensor,
-                new_pitch: float,
-                pitchRangeFactor: float) -> torch.Tensor:
+                pitch_shift: float,
+                pitch_range: float) -> torch.Tensor:
         """Shift the pitch of given speech tensor.
         Args:
             snd: [torch.float32; [T]], mono-channel, [-1, 1]-ranged.
             pitch: [torch.float32; [S]], pitch sequence, hertz-level.
-            new_pitch: new median pitch frequency.
-            pitchRangeFactor: pitch ranging factor.
+            pitch_shift: pitch shifting factor.
+            pitch_range: pitch ranging factor.
         Returns:
             [torch.float32; [T]], shifted.
         """
@@ -217,16 +214,13 @@ class PitchShift(nn.Module):
         peaks = find_allpeaks(snd, f0, self.sr)
 
         # nonzero median
-        median = pitch[pitch > 0.].median().item()
-        # scaling factor
-        factor = new_pitch / median
-
+        median = f0[f0 > 0.].median().item() * pitch_shift
         # shift
-        pitch = pitch * factor
+        f0 = f0 * pitch_shift
         # rerange
-        pitch = torch.where(
-            pitch > 0.,
-            new_pitch + (pitch - new_pitch) * pitchRangeFactor,
+        f0 = torch.where(
+            f0 > 0.,
+            median + (f0 - median) * pitch_range,
             0.)
 
-        return psola(snd, pitch, peaks, self.sr)
+        return psola(snd, f0, peaks, self.sr)
