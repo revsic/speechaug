@@ -1,20 +1,6 @@
-"""
-Copyright (C) https://github.com/praat/praat
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
- 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
- 
-You should have received a copy of the GNU General Public License
-along with this program. If not, see <http://www.gnu.org/licenses/>
-"""
-from typing import Optional, Tuple, Union
+import warnings
+from typing import Callable, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -22,57 +8,71 @@ import torch.nn.functional as F
 
 
 class PitchShift(nn.Module):
-    """Pitch shift with formant correction, based on TD-PSOLA
+    """Pitch shift with formant correction, based on TD-PSOLA, reimplementation of Praat.
     """
     def __init__(self,
                  sr: int,
-                 floor: float = 60):
+                 floor: float = 60,
+                 bins_per_octave: int = 12,
+                 window_fn: Callable[[int, torch.device], torch.Tensor] = torch.hann_window):
         """Initializer.
         Args:
             sr: sampling rate.
             floor: floor value of fundamental frequency.
+            bins_per_octave: the number of the bins in an octave.
+            window_fn: window function, default hann window.
         """
         super().__init__()
         self.sr = sr
         self.floor = floor
+        self.bins_per_octave = bins_per_octave
+        self.window_fn = window_fn
 
     def forward(self,
                 snd: torch.Tensor,
                 pitch: torch.Tensor,
-                pitch_shift: float,
+                steps: int,
                 pitch_range: float) -> torch.Tensor:
-        """Shift the pitch of given speech tensor.
+        """Manipulate the fundamental frequency.
         Args:
-            snd: [torch.float32; [T]], mono-channel, [-1, 1]-ranged.
-            pitch: [torch.float32; [S]], pitch sequence, hertz-level.
-            pitch_shift: pitch shifting factor.
-            pitch_range: pitch ranging factor.
+            snd: [torch.float32; [T]], audio signal, [-1, 1]-ranged.
+            pitch: [torch.float32; [S]], fundamental frequencies.
+            steps: the number of the steps to shift.
+            pitch_range: ranging factor.
         Returns:
-            [torch.float32; [T]], shifted.
+            [torch.float32; [T]], resampled.
         """
-        # [T], mean normalization
-        snd = snd - snd.mean()
+        if not (pitch > 1e-5).any():
+            warnings.warn('all unvoiced, pitch is all zero')
+            return snd
         # [T]
         f0 = F.interpolate(pitch[None, None], size=len(snd), mode='linear')[0, 0]
         # [P], find all peaks in voiced segment
         peaks = self.find_allpeaks(snd, f0)
+        if peaks is None:
+            warnings.warn('peak not found, maybe given is all unvoiced.')
+            return snd
 
         # nonzero median
-        median = f0[f0 > 0.].median().item() * pitch_shift
+        median = pitch[pitch > 0.].median().item()
+        # scaling factor
+        factor = 2 ** (steps / self.bins_per_octave)
+
         # shift
-        f0 = f0 * pitch_shift
+        f0, median = f0 * factor, median * factor
         # rerange
         f0 = torch.where(
             f0 > 0.,
             median + (f0 - median) * pitch_range,
             0.)
-
+        # resample
         return self.psola(snd, f0, peaks)
 
     def find_voiced_segment(self, f0: torch.Tensor, i: int = 0) -> Optional[Tuple[int, int]]:
         """Find voiced segment starting from `i`.
         Args:
             f0: [torch.float32; [T]], fundamental frequencies, hertz-level.
+            i: starting index.
         Returns:
             segment left and right if voiced segment exist (half inclusive range)
         """
@@ -99,7 +99,7 @@ class PitchShift(nn.Module):
             signal: [torch.float32; [T]], speech signal, [-1, 1]-ranged.
             f0: [torch.float32; [T]], fundamental frequencies, hertz-level.
         Returns:
-            [torch.long; [P]], peaks.
+            [torch.long; [P]], found peaks.
         """
         # []
         global_peak = signal.abs().max()
@@ -207,9 +207,10 @@ class PitchShift(nn.Module):
                 break
             # if voice found
             left_v, right_v = voiced
-            # copy noise
-            window = torch.hann_window(left_v - i, device=device)
-            new_signal[i:left_v] += window * signal[i:left_v]
+            if i < left_v:
+                # copy noise, do not cache the window
+                window = self.window_fn(left_v - i, device=device)
+                new_signal[i:left_v] += window * signal[i:left_v]
 
             while left_v < right_v:
                 # find nearest peak
@@ -217,7 +218,7 @@ class PitchShift(nn.Module):
                 period = int(self.sr / pitch[left_v].clamp_min(self.floor))
                 # width
                 left_w, right_w = period // 2, period // 2
-                # clamping
+                # clamping for aliasing
                 if p > 0 and peaks[p] - peaks[p - 1] <= max_w:
                     left_w = min(peaks[p] - peaks[p - 1], left_w)
                 if p < len(peaks) - 1 and peaks[p + 1] - peaks[p] <= max_w:
