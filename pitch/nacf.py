@@ -108,7 +108,7 @@ class NACF(nn.Module):
         # [..., T / strides, t - 1], inc & dec
         localmax = (d[..., :-1] >= 0) & (d[..., 1:] <= 0)
         # [..., T / strides, t - 1]
-        flag = localmax & (nacf > 0.5 * self.thold_voicing)
+        flag = localmax & (nacf[..., 1:-1] > 0.5 * self.thold_voicing)
 
         # [..., T / strides, t - 1], parabolic interpolation
         n, c, p = nacf[..., 2:], nacf[..., 1:-1], nacf[..., :-2]
@@ -143,7 +143,7 @@ class NACF(nn.Module):
         delta = torch.where(
             ~voiced,
             logits_uv[..., None],
-            logits - self.cost_octave * (self.freq_max / freqs).log2())
+            logits - self.cost_octave * (self.fmax / freqs).log2())
 
         # [..., T / strides, k, k]
         trans = self.cost_jump * (
