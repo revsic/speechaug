@@ -14,6 +14,8 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>
 """
+from typing import Optional
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -35,7 +37,8 @@ class NACF(nn.Module):
                  thold_voicing: float = 0.45,
                  cost_octave: float = 0.01,
                  cost_jump: float = 0.35,
-                 cost_vuv: float = 0.14):
+                 cost_vuv: float = 0.14,
+                 median_win: Optional[int] = 7):
         """Initializer.
         Args:
             sr: sampling rate.
@@ -72,6 +75,7 @@ class NACF(nn.Module):
         c = 0.01 * down_sr
         self.cost_jump = cost_jump * c
         self.cost_vuv = cost_vuv * c
+        self.median_win = median_win
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Estimate the pitch from the input signal.
@@ -180,4 +184,14 @@ class NACF(nn.Module):
         # masking unvoiced
         freqs.masked_fill_(~voiced.gather(-1, states[..., None]), 0.)
         # [..., T / strides]
-        return freqs.squeeze(dim=-1)
+        f0 = freqs.squeeze(dim=-1)
+        # median pool
+        if self.median_win is not None:
+            w = self.median_win // 2
+            # replication
+            f0 = torch.cat(
+                [f0[..., :1]] * w + [f0] + [f0[..., -1:]] * w, dim=-1)
+            f0 = torch.median(
+                f0.unfold(-1, self.median_win, 1),
+                dim=-1).values
+        return f0
