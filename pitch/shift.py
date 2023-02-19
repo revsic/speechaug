@@ -240,7 +240,7 @@ class PitchShift(nn.Module):
 
             while left_v < right_v:
                 # find nearest peak
-                p = (peaks - left_v).abs().argmin()
+                p = (peaks - left_v).abs().argmin().item()
                 period = int(self.sr / pitch[left_v].clamp_min(self.floor))
                 # width
                 left_w, right_w = period // 2, period // 2
@@ -252,15 +252,16 @@ class PitchShift(nn.Module):
                 # clamping for sampling
                 left_w, right_w = min(left_w, peaks[p]), max(min(right_w, timesteps - peaks[p]), 0)
                 # offset to index
-                left_i, right_i = peaks[p] - left_w, peaks[p] + right_w
+                left_i, right_i = int(peaks[p] - left_w), int(peaks[p] + right_w)
                 # copy
                 s = left_v - (right_i - left_i) // 2
-                intval = min(right_i - left_i, timesteps - s)
+                s, r = max(s, 0), max(-s, 0)
+                intval = min(right_i - left_i - r, timesteps - s)
                 # for safety
                 if intval == 0:
                     break
                 seg = cached_window(left_w, right_w) * signal[left_i:right_i]
-                new_signal[s:s + intval] = seg[:intval]
+                new_signal[s:s + intval] = seg[r:r + intval]
                 # next
                 left_v += intval
             # next segment
