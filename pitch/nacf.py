@@ -38,7 +38,7 @@ class NACF(nn.Module):
                  cost_octave: float = 0.01,
                  cost_jump: float = 0.35,
                  cost_vuv: float = 0.14,
-                 median_win: Optional[int] = 7):
+                 median_win: Optional[int] = 5):
         """Initializer.
         Args:
             sr: sampling rate.
@@ -72,7 +72,7 @@ class NACF(nn.Module):
         self.thold_voicing = thold_voicing
         self.cost_octave = cost_octave
         # correction
-        c = 0.01 * down_sr
+        c = 1.  # c = 0.01 * down_sr
         self.cost_jump = cost_jump * c
         self.cost_vuv = cost_vuv * c
         self.median_win = median_win
@@ -87,7 +87,7 @@ class NACF(nn.Module):
         x = AF.resample(inputs, self.sr, self.down_sr)
         # [..., T / strides, w]
         frames = F.pad(x, [0, self.w]).unfold(-1, self.w, self.strides)
-        # [w], windowing
+        # [..., T / strides, w]
         frames = (frames - frames.mean(dim=-1)[..., None]) * self.window
 
         # [...]
@@ -149,15 +149,15 @@ class NACF(nn.Module):
             logits_uv[..., None],
             logits - self.cost_octave * (self.fmax / freqs).log2())
 
-        # [..., T / strides, k, k]
+        # [..., T / strides - 1, k, k]
         trans = self.cost_jump * (
-            freqs[..., None] / freqs[..., None, :]).log2().abs()
+            freqs[..., :-1, :, None] / freqs[..., 1:, None, :]).log2().abs()
         # both voiceless
         trans.masked_fill_(
-            ~voiced[..., None] & ~voiced[..., None, :], 0.)
+            ~voiced[..., :-1, :, None] & ~voiced[..., 1:, None, :], 0.)
         # voice transition
         trans.masked_fill_(
-            voiced[..., None] != voiced[..., None, :], self.cost_vuv)
+            voiced[..., :-1, :, None] != voiced[..., 1:, None, :], self.cost_vuv)
 
         # S(=T / strides)
         steps = delta.shape[-2]
@@ -169,7 +169,7 @@ class NACF(nn.Module):
             # [..., k]
             value, ptrs[..., i, :] = (
                 value[..., None]
-                - trans[..., i, :, :] + delta[..., i, None, :]).max(dim=-2)
+                - trans[..., i - 1, :, :] + delta[..., i, None, :]).max(dim=-2)
         # [..., S], backtracking
         states = torch.zeros_like(delta[..., 0], dtype=torch.long)
         # initial state
