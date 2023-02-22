@@ -104,25 +104,25 @@ class NACF(nn.Module):
         acf = torch.fft.irfft(fft * fft.conj(), dim=-1)[..., :self.w]
         # [..., T / strides, w], normalized autocorrelation
         nacf = acf / (acf[..., :1] * self.nacw)
-        # [..., T / strides, t(=tmax - tmin) + 1], sampling
-        nacf = nacf[..., self.tmin:self.tmax + 1]
+        # [..., T / strides, tmax + 1]
+        nacf = nacf[..., :self.tmax + 1]
 
-        # [..., T / strides, t], x[i + 1] - x[i]
+        # [..., T / strides, tmax], x[i + 1] - x[i]
         d = nacf.diff(dim=-1)
-        # [..., T / strides, t - 1], inc & dec
+        # [..., T / strides, tmax - 1], inc & dec
         localmax = (d[..., :-1] >= 0) & (d[..., 1:] <= 0)
-        # [..., T / strides, t - 1]
+        # [..., T / strides, tmax - 1]
         flag = localmax & (nacf[..., 1:-1] > 0.5 * self.thold_voicing)
 
-        # [..., T / strides, t - 1], parabolic interpolation
+        # [..., T / strides, tmax - 1], parabolic interpolation
         n, c, p = nacf[..., 2:], nacf[..., 1:-1], nacf[..., :-2]
         dr =  0.5 * (n - p) / (2. * c - n - p)
-        # [t - 1]
-        a = torch.arange(self.tmax - self.tmin - 1, device=dr.device)
-        # [..., T / strides, t - 1]
-        freqs = self.down_sr / (self.tmin + (dr + a).clamp_min(0.))
+        # [tmax - 1]
+        a = torch.arange(self.tmax - 1, device=dr.device)
+        # [..., T / strides, tmax - 1]
+        freqs = self.down_sr / (1 + (dr + a).clamp_min(0.))
         ## TODO: sinc interpolation, depth=30
-        logits = nacf[..., 1:-1]
+        logits = nacf[..., 1:self.tmax]
         # reflect logits of high values (for short windows)
         logits = logits.where(logits <= 1., 1 / logits)
         # additional penalty
@@ -142,7 +142,7 @@ class NACF(nn.Module):
             self.thold_silence / (1. + self.thold_voicing))
         logits_uv = self.thold_voicing + logits_uv.clamp_min(0.)
         # [..., T / strides, k]
-        voiced = logits > FLOOR
+        voiced = (logits > FLOOR) & (freqs < self.fmax)
         # [..., T / strides, k]
         delta = torch.where(
             ~voiced,
