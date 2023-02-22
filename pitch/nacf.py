@@ -96,7 +96,9 @@ class NACF(nn.Module):
         local_peak = frames.abs().amax(dim=-1)
         # [..., T / strides]
         intensity = torch.where(
-            local_peak > global_peak, 1., local_peak / global_peak)
+            local_peak > global_peak[..., None],
+            torch.tensor(1., device=x.device),
+            local_peak / global_peak[..., None])
 
         # [..., T / strides, w + 1]
         fft = torch.fft.rfft(frames, self.w * 2, dim=-1)
